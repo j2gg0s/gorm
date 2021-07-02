@@ -1,12 +1,20 @@
 package tests_test
 
 import (
+	"database/sql"
+	"fmt"
 	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/j2gg0s/otsql"
+	"github.com/j2gg0s/otsql/hook/metric"
+	"github.com/j2gg0s/otsql/hook/trace"
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/stdlib"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -40,6 +48,21 @@ func init() {
 	}
 }
 
+func otsqlHook() otsql.Option {
+	mhook, err := metric.New()
+	if err != nil {
+		panic(err)
+	}
+	return otsql.WithHooks(
+		trace.New(
+			trace.WithAllowRoot(true),
+			trace.WithQuery(true),
+			trace.WithQueryParams(true),
+		),
+		mhook,
+	)
+}
+
 func OpenTestConnection() (db *gorm.DB, err error) {
 	dbDSN := os.Getenv("GORM_DSN")
 	switch os.Getenv("GORM_DIALECT") {
@@ -48,15 +71,33 @@ func OpenTestConnection() (db *gorm.DB, err error) {
 		if dbDSN == "" {
 			dbDSN = "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=Local"
 		}
-		db, err = gorm.Open(mysql.Open(dbDSN), &gorm.Config{})
+		dname, err := otsql.Register("mysql", otsqlHook())
+		if err != nil {
+			return nil, fmt.Errorf("register otsql: %w", err)
+		}
+		db, err = gorm.Open(
+			mysql.New(mysql.Config{DriverName: dname, DSN: dbDSN}),
+			&gorm.Config{})
 	case "postgres":
 		log.Println("testing postgres...")
 		if dbDSN == "" {
 			dbDSN = "user=gorm password=gorm dbname=gorm host=localhost port=9920 sslmode=disable TimeZone=Asia/Shanghai"
 		}
+		config, err := pgx.ParseConfig(dbDSN)
+		if err != nil {
+			return nil, err
+		}
+		config.PreferSimpleProtocol = true
+		config.RuntimeParams["timezone"] = "Asia/Shanghai"
+
+		dname, err := otsql.Register("pgx", otsqlHook())
+		if err != nil {
+			return nil, err
+		}
+		sqldb, err := sql.Open(dname, stdlib.RegisterConnConfig(config))
+
 		db, err = gorm.Open(postgres.New(postgres.Config{
-			DSN:                  dbDSN,
-			PreferSimpleProtocol: true,
+			Conn: sqldb,
 		}), &gorm.Config{})
 	case "sqlserver":
 		// CREATE LOGIN gorm WITH PASSWORD = 'LoremIpsum86';
